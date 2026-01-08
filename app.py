@@ -89,12 +89,10 @@ def _extract_json_list(text: str) -> list[dict]:
 
 def run_agent(sport: str, conference: str) -> list[dict]:
     """Calls Gemini 2.0 Flash with Google Search grounding via raw HTTP."""
-    api_key = st.secrets["GEMINI_API_KEY"]
+    # Strip to avoid invisible whitespace/newlines breaking requests/URL parsing.
+    api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/gemini-2.0-flash:generateContent?key={api_key}"
-    )
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
     prompt = f"""
 You are a research agent. Use live web search.
@@ -118,11 +116,14 @@ Return ONLY a strict JSON array (no markdown) where each item is:
 
     _log("D", "app.py:132", "Gemini request starting", {"sport": sport, "conference": conference})
     try:
-        resp = requests.post(url, json=payload, timeout=90)
+        # Pass key as a query param to avoid malformed URLs if api_key has whitespace.
+        resp = requests.post(url, params={"key": api_key}, json=payload, timeout=(15, 90))
         _log("D", "app.py:135", "Gemini response received", {"status": resp.status_code})
     except Exception as e:
-        _log("D", "app.py:137", "Gemini request failed", {"error": str(e)})
-        raise RuntimeError("API Request Failed (network/request error).") from e
+        # Never leak secrets. Sanitize any accidental echo of the key.
+        safe_msg = str(e).replace(api_key, "[REDACTED]") if api_key else str(e)
+        _log("D", "app.py:137", "Gemini request failed", {"errorType": type(e).__name__, "error": safe_msg[:500]})
+        raise RuntimeError(f"API Request Failed (network/request error): {type(e).__name__}: {safe_msg}") from e
 
     if resp.status_code != 200:
         # Do NOT leak api_key; show only server message.
