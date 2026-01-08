@@ -25,53 +25,29 @@ def connect_services():
     except Exception as e:
         return None
 
-# --- 2. DYNAMIC MODEL LOADER (FILTERED) ---
-def get_safe_models():
-    """
-    Only returns Gemini 1.5 models. 
-    Gemini 2.0 requires a different tool structure that crashes this library version.
-    """
-    try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        valid_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                name = m.name.replace("models/", "")
-                # STRICT FILTER: Only allow 1.5 models to prevent "Tool" crashes
-                if "gemini-1.5" in name:
-                    valid_models.append(name)
-        
-        # If list is empty (rare), force the generic alias
-        if not valid_models:
-            return ["gemini-1.5-flash"]
-            
-        return sorted(valid_models)
-    except Exception as e:
-        # Fallback if listing fails
-        return ["gemini-1.5-flash"]
-
-# --- 3. AI AGENT ---
-def run_agent(sport, conference, selected_model_name):
+# --- 2. AI AGENT (Gemini 2.0 Fix) ---
+def run_agent(sport, conference):
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # This tool definition works ONLY with Gemini 1.5
+        # WE ARE USING GEMINI 2.0
+        # This is the only model your account seems to have access to (based on previous errors).
+        model_name = "gemini-2.0-flash-exp"
+        
+        # --- THE FIX ---
+        # Instead of using 'genai.protos' (which crashed), we use a raw dictionary.
+        # We use the key 'google_search' which Gemini 2.0 specifically requested.
         tools = [
-            {"google_search_retrieval": {
-                "dynamic_retrieval_config": {
-                    "mode": "dynamic",
-                    "dynamic_threshold": 0.7,
-                }
-            }}
+            {'google_search': {}} 
         ]
         
-        model = genai.GenerativeModel(selected_model_name, tools=tools)
+        model = genai.GenerativeModel(model_name, tools=tools)
         
     except Exception as e:
         st.error(f"Configuration Error: {e}")
         return []
 
-    st.info(f"🤖 Agent (using {selected_model_name}) is searching Google for {conference} {sport}...")
+    st.info(f"🤖 Agent (using {model_name}) is searching Google for {conference} {sport}...")
     
     prompt = f"""
     Find the 2025 coaching staff directory for {sport} in the {conference} conference.
@@ -98,27 +74,17 @@ def run_agent(sport, conference, selected_model_name):
     
     except Exception as e:
         st.error(f"Execution Error: {e}")
+        st.caption("If this fails, your API key might not have 'Vertex AI' enabled properly.")
         return []
 
-# --- 4. APP INTERFACE ---
+# --- 3. APP INTERFACE ---
 
 with st.sidebar:
     st.header("🎛️ Settings")
+    st.info("Using Model: gemini-2.0-flash-exp")
     
-    # LOAD ONLY SAFE MODELS
-    safe_models = get_safe_models()
-    
-    # Default to Flash if available (faster/cheaper)
-    default_index = 0
-    if "gemini-1.5-flash" in safe_models:
-        default_index = safe_models.index("gemini-1.5-flash")
-        
-    model_choice = st.selectbox("Select AI Model", safe_models, index=default_index)
-    st.caption("Note: Gemini 2.0 models hidden to prevent compatibility errors.")
-
     st.divider()
     
-    # HISTORY LOADER
     worksheet = connect_services()
     df_history = pd.DataFrame()
     if worksheet:
@@ -145,27 +111,24 @@ with tab1:
         target_conf = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial"])
 
     if st.button(f"🚀 Find {target_conf} Coaches"):
-        if not model_choice:
-            st.error("No model selected.")
-        else:
-            with st.spinner(f"Connecting to {model_choice}..."):
-                new_data = run_agent(target_sport, target_conf, model_choice)
+        with st.spinner("Connecting..."):
+            new_data = run_agent(target_sport, target_conf)
+            
+            if new_data:
+                st.success(f"Found {len(new_data)} coaches!")
+                st.dataframe(new_data)
                 
-                if new_data:
-                    st.success(f"Found {len(new_data)} coaches!")
-                    st.dataframe(new_data)
-                    
-                    if worksheet:
-                        rows = [[target_sport, target_conf, d.get("school"), d.get("coach_name"), d.get("title"), d.get("email")] for d in new_data]
-                        try:
-                            worksheet.append_rows(rows)
-                            st.toast("✅ Saved!")
-                            time.sleep(2)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Save Error: {e}")
-                else:
-                    st.warning("No data found.")
+                if worksheet:
+                    rows = [[target_sport, target_conf, d.get("school"), d.get("coach_name"), d.get("title"), d.get("email")] for d in new_data]
+                    try:
+                        worksheet.append_rows(rows)
+                        st.toast("✅ Saved!")
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Save Error: {e}")
+            else:
+                st.warning("No data found.")
 
 with tab2:
     if df_history.empty:
