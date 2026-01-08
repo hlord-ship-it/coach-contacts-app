@@ -6,6 +6,7 @@ import json
 import requests
 import time
 import re
+from bs4 import BeautifulSoup
 
 # --- 1. CORE CONFIGURATION ---
 st.set_page_config(page_title="NCAA Coach Harvester v2", layout="wide")
@@ -31,6 +32,7 @@ SPORT_SEARCH_PATTERNS = {
 
 # Known athletics URL patterns by school (fallback database)
 KNOWN_ATHLETICS_DOMAINS = {
+    # Ivy League
     "Brown": "brownbears.com",
     "Columbia": "gocolumbialions.com", 
     "Cornell": "cornellbigred.com",
@@ -39,6 +41,54 @@ KNOWN_ATHLETICS_DOMAINS = {
     "Penn": "pennathletics.com",
     "Princeton": "goprincetontigers.com",
     "Yale": "yalebulldogs.com",
+    # ACC
+    "Boston College": "bcathletics.com",
+    "Duke": "goduke.com",
+    "North Carolina": "goheels.com",
+    "NC State": "gopack.com",
+    "Virginia": "virginiasports.com",
+    "Wake Forest": "godeacs.com",
+    "Clemson": "clemsontigers.com",
+    "Florida State": "seminoles.com",
+    "Georgia Tech": "ramblinwreck.com",
+    "Louisville": "gocards.com",
+    "Miami (FL)": "miamihurricanes.com",
+    "Notre Dame": "und.com",
+    "Pittsburgh": "pittsburghpanthers.com",
+    "Syracuse": "cuse.com",
+    "Virginia Tech": "hokiesports.com",
+    # Big Ten
+    "Michigan": "mgoblue.com",
+    "Ohio State": "ohiostatebuckeyes.com",
+    "Penn State": "gopsusports.com",
+    "Wisconsin": "uwbadgers.com",
+    "Iowa": "hawkeyesports.com",
+    "Minnesota": "gophersports.com",
+    "Illinois": "fightingillini.com",
+    "Indiana": "iuhoosiers.com",
+    "Maryland": "umterps.com",
+    "Michigan State": "msuspartans.com",
+    "Nebraska": "huskers.com",
+    "Northwestern": "nusports.com",
+    "Purdue": "purduesports.com",
+    "Rutgers": "scarletknights.com",
+    # SEC
+    "Alabama": "rolltide.com",
+    "Auburn": "auburntigers.com",
+    "Florida": "floridagators.com",
+    "Georgia": "georgiadogs.com",
+    "Kentucky": "ukathletics.com",
+    "LSU": "lsusports.net",
+    "Mississippi State": "hailstate.com",
+    "Ole Miss": "olemisssports.com",
+    "South Carolina": "gamecocksonline.com",
+    "Tennessee": "utsports.com",
+    "Texas A&M": "12thman.com",
+    "Vanderbilt": "vucommodores.com",
+    "Arkansas": "arkansasrazorbacks.com",
+    "Missouri": "mutigers.com",
+    "Texas": "texassports.com",
+    "Oklahoma": "soonersports.com",
 }
 
 def robust_json_extract(text):
@@ -153,6 +203,10 @@ def search_for_staff_page(school, sport, status_container=None):
                 if any(x in link.lower() for x in ['news', 'recap', 'schedule', 'roster', 'stats']):
                     score -= 15
                 
+                # Penalty for recreation/intramural pages (not varsity athletics!)
+                if any(x in link.lower() for x in ['/rec/', 'recreation', 'intramural', 'club-sport']):
+                    score -= 30
+                
                 # Bonus if email visible in snippet
                 if '@' in snippet:
                     score += 25
@@ -173,40 +227,140 @@ def search_for_staff_page(school, sport, status_container=None):
 
 def scrape_page_content(url, status_container=None):
     """
-    Scrape page content using Jina Reader with retry logic.
+    Scrape page content with multiple fallback methods.
+    Priority: 1) Jina Reader  2) Direct requests  3) Firecrawl
     """
     if not url:
         return None
-        
+    
+    content = None
+    
+    # Method 1: Jina Reader (best for JS-rendered pages)
     try:
-        # Jina Reader API
+        if status_container:
+            status_container.write("   Trying Jina Reader...")
+        
         jina_url = f"https://r.jina.ai/{url}"
         headers = {
             "Accept": "text/plain",
             "X-Return-Format": "text"
         }
         
-        response = requests.get(jina_url, headers=headers, timeout=30)
+        response = requests.get(jina_url, headers=headers, timeout=15)
         
-        if response.status_code == 200:
+        if response.status_code == 200 and len(response.text) > 500:
             content = response.text
-            
-            # Check if we got meaningful content
-            if len(content) < 500:
-                if status_container:
-                    status_container.write(f"⚠️ Page content too short ({len(content)} chars)")
-                return None
-                
-            return content
-        else:
             if status_container:
-                status_container.write(f"⚠️ Jina returned status {response.status_code}")
-            return None
+                status_container.write(f"   ✅ Jina succeeded ({len(content):,} chars)")
+            return content
             
+    except requests.exceptions.Timeout:
+        if status_container:
+            status_container.write("   ⏱️ Jina timed out, trying fallback...")
     except Exception as e:
         if status_container:
-            status_container.write(f"⚠️ Scrape error: {e}")
-        return None
+            status_container.write(f"   ⚠️ Jina failed: {str(e)[:50]}")
+    
+    # Method 2: Direct HTTP request with good headers (works for many .edu sites)
+    try:
+        if status_container:
+            status_container.write("   Trying direct request...")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        
+        if response.status_code == 200:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+            
+            # Get text content
+            text = soup.get_text(separator='\n', strip=True)
+            
+            # Clean up whitespace
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            content = '\n'.join(lines)
+            
+            if len(content) > 500:
+                if status_container:
+                    status_container.write(f"   ✅ Direct request succeeded ({len(content):,} chars)")
+                return content
+                
+    except Exception as e:
+        if status_container:
+            status_container.write(f"   ⚠️ Direct request failed: {str(e)[:50]}")
+    
+    # Method 3: Firecrawl API (if configured)
+    if "FIRECRAWL_API_KEY" in st.secrets:
+        try:
+            if status_container:
+                status_container.write("   Trying Firecrawl...")
+            
+            fc_url = "https://api.firecrawl.dev/v0/scrape"
+            headers = {
+                "Authorization": f"Bearer {st.secrets['FIRECRAWL_API_KEY']}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "url": url,
+                "pageOptions": {"onlyMainContent": True}
+            }
+            
+            response = requests.post(fc_url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get('data', {}).get('content', '')
+                
+                if len(content) > 500:
+                    if status_container:
+                        status_container.write(f"   ✅ Firecrawl succeeded ({len(content):,} chars)")
+                    return content
+                    
+        except Exception as e:
+            if status_container:
+                status_container.write(f"   ⚠️ Firecrawl failed: {str(e)[:50]}")
+    
+    # Method 4: ScrapingBee API (if configured) - handles JS well
+    if "SCRAPINGBEE_API_KEY" in st.secrets:
+        try:
+            if status_container:
+                status_container.write("   Trying ScrapingBee...")
+            
+            sb_url = "https://app.scrapingbee.com/api/v1/"
+            params = {
+                "api_key": st.secrets["SCRAPINGBEE_API_KEY"],
+                "url": url,
+                "render_js": "true",
+                "extract_rules": '{"text":"body"}'
+            }
+            
+            response = requests.get(sb_url, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                content = response.json().get('text', '')
+                
+                if len(content) > 500:
+                    if status_container:
+                        status_container.write(f"   ✅ ScrapingBee succeeded ({len(content):,} chars)")
+                    return content
+                    
+        except Exception as e:
+            if status_container:
+                status_container.write(f"   ⚠️ ScrapingBee failed: {str(e)[:50]}")
+    
+    if status_container:
+        status_container.write("   ❌ All scraping methods failed")
+    
+    return None
 
 def extract_coaches_with_gemini(content, school, sport, status_container=None):
     """
