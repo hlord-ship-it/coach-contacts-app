@@ -35,29 +35,12 @@ def get_google_sheet():
 
 # --- 3. THE AI RESEARCH AGENT (DIRECT REST) ---
 def run_research_agent(sport, conference):
-    """Calls Gemini 2.0 Flash via REST to find coaching staff using Google Search."""
     api_key = st.secrets["GEMINI_API_KEY"]
-    
-    # We use v1beta to access the gemini-2.0-flash model and google_search tool
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
-    headers = {'Content-Type': 'application/json'}
-    
-    # Constructing the raw payload to bypass SDK validation
     payload = {
-        "contents": [{
-            "parts": [{
-                "text": (
-                    f"Research the 2025 coaching staff for {sport} in the {conference} conference. "
-                    "For every university in the conference, find the Head Coach and Assistant Coaches. "
-                    "Return the results as a JSON list of objects with these keys: "
-                    "school, coach_name, title, email. If email is not found, use 'Not Listed'."
-                )
-            }]
-        }],
-        "tools": [
-            {"google_search": {}} # This triggers the search grounding
-        ],
+        "contents": [{"parts": [{"text": f"Research the 2025 coaching staff for {sport} in the {conference} conference. Return a JSON list: school, coach_name, title, email."}]}],
+        "tools": [{"google_search": {}}],
         "generationConfig": {
             "response_mime_type": "application/json",
             "temperature": 0.0
@@ -65,23 +48,38 @@ def run_research_agent(sport, conference):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        
-        if response.status_code != 200:
-            st.error(f"Google API Error {response.status_code}: {response.text}")
-            return None
-        
-        # Extract the JSON string from the response
+        response = requests.post(url, json=payload, timeout=90)
         res_data = response.json()
+        
+        # --- DEBUG WINDOW ---
+        with st.expander("🛠️ Debug: Raw AI Response"):
+            st.write(res_data)
+        
+        # 1. Check if the response actually has content
+        if 'candidates' not in res_data or not res_data['candidates'][0]['content'].get('parts'):
+            st.error("The AI returned an empty response. This often means 'Google Search' is disabled for your API key or billing is required.")
+            return None
+
         raw_output = res_data['candidates'][0]['content']['parts'][0]['text']
         
-        # Parse the JSON string into a Python list
-        return json.loads(raw_output)
+        # 2. Clean the output (strip markdown if the model ignored our request)
+        clean_output = raw_output.strip()
+        if clean_output.startswith("```"):
+            clean_output = clean_output.split("json")[-1].split("```")[0].strip()
         
+        if not clean_output:
+            st.warning("The AI found no data for this conference.")
+            return []
+
+        return json.loads(clean_output)
+        
+    except json.JSONDecodeError as e:
+        st.error(f"JSON Error: The model gave us text that wasn't a list. Raw text: {raw_output[:100]}...")
+        return None
     except Exception as e:
         st.error(f"Research Agent failed: {e}")
         return None
-
+        
 # --- 4. STREAMLIT UI ---
 st.title("🏆 Athletic Strategy Database")
 st.markdown("Automated coaching staff discovery via Gemini 2.0 Search Grounding.")
