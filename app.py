@@ -28,21 +28,25 @@ def connect_services():
         return client.open_by_url(sheet_url).sheet1
         
     except Exception as e:
-        # Graceful fail if sheet isn't set up yet, so app still runs
         return None
 
-# --- 2. AI AGENT (With Native Google Search) ---
+# --- 2. AI AGENT (With Explicit Google Search) ---
 def run_agent(sport, conference, model_name):
-    # 1. Configure Gemini
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # We enable the "google_search" tool directly in the model
-        tools = [
-            {"google_search": {}}
-        ]
+        # --- THE FIX ---
+        # We use the explicit 'Protos' definition to avoid syntax errors.
+        # This tells the API strictly: "Use the Google Search Retrieval tool"
+        tool_config = genai.protos.Tool(
+            google_search_retrieval=genai.protos.GoogleSearchRetrieval(
+                dynamic_retrieval_config=genai.protos.DynamicRetrievalConfig(
+                    mode=genai.protos.DynamicRetrievalConfig.Mode.MODE_DYNAMIC
+                )
+            )
+        )
         
-        model = genai.GenerativeModel(model_name, tools=tools)
+        model = genai.GenerativeModel(model_name, tools=[tool_config])
         
     except Exception as e:
         st.error(f"Error configuring AI: {e}")
@@ -52,7 +56,6 @@ def run_agent(sport, conference, model_name):
     status_text = f"🤖 Agent is using Google Search to find {conference} {sport} coaches..."
     st.info(status_text)
     
-    # We ask the AI to do the search and extraction in one step
     prompt = f"""
     Find the 2025 coaching staff directory for {sport} in the {conference} conference.
     For every university in the conference, list the Head Coach and Assistant Coaches.
@@ -62,18 +65,16 @@ def run_agent(sport, conference, model_name):
     """
     
     try:
-        # Generate content with search tool enabled
+        # Generate content
         response = model.generate_content(prompt)
         
         # 3. Parsing Phase
         st.info("🔄 Parsing coach data...")
         
-        # Extract the text and clean it for JSON
         raw_text = response.text
-        # Remove markdown code blocks if present
         clean_text = raw_text.replace("```json", "").replace("```", "").strip()
         
-        # Attempt to find the list start/end if there is extra text
+        # Attempt to find the list start/end
         start = clean_text.find("[")
         end = clean_text.rfind("]") + 1
         if start != -1 and end != -1:
@@ -83,17 +84,15 @@ def run_agent(sport, conference, model_name):
     
     except Exception as e:
         st.error(f"Agent Error: {e}")
-        st.caption("If this says '404', switch the model in the sidebar.")
+        st.caption("If this persists, try switching to 'gemini-1.5-pro' in the sidebar.")
         return []
 
 # --- 3. APP INTERFACE ---
 
-# Sidebar
 with st.sidebar:
     st.header("🎛️ Settings")
     
-    # The Safe Model List
-    # gemini-2.0-flash-exp is the most likely to work for you
+    # gemini-2.0-flash-exp is the best balance of speed and search capability
     model_name = st.selectbox(
         "Select AI Model", 
         ["gemini-2.0-flash-exp", "gemini-1.5-pro-002", "gemini-1.5-flash-002"],
@@ -119,12 +118,10 @@ with st.sidebar:
         options = ["Show All"] + [f"{r.conference} - {r.sport}" for i, r in pairs.iterrows()]
         selected_filter = st.radio("Load Database:", options)
 
-# Main Page
 st.title("🏆 Athletic Strategy Database")
 
 tab1, tab2 = st.tabs(["🔍 Find New Coaches", "📂 View Database"])
 
-# TAB 1: SEARCH
 with tab1:
     col1, col2 = st.columns(2)
     with col1:
@@ -141,7 +138,6 @@ with tab1:
                 st.dataframe(new_data)
                 
                 if worksheet:
-                    # Prepare rows dynamically based on keys
                     rows = []
                     for d in new_data:
                         rows.append([
@@ -163,7 +159,6 @@ with tab1:
             else:
                 st.warning("No data found. Try a different model in the sidebar.")
 
-# TAB 2: DATABASE
 with tab2:
     if df_history.empty:
         st.info("Database is empty.")
@@ -175,4 +170,4 @@ with tab2:
                 (display_df["conference"] == f_conf) & 
                 (display_df["sport"] == f_sport)
             ]
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, use_container_width=True) 
