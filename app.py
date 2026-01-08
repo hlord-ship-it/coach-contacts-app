@@ -8,7 +8,7 @@ import time
 
 # --- 1. SETUP & AUTHENTICATION ---
 try:
-    # This looks for the hidden "Secrets" menu we are about to set up
+    # This looks for the hidden "Secrets" menu
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
@@ -72,20 +72,15 @@ if st.button(f"🚀 Find {target_conf} Coaches", type="primary"):
             rows = [[d.get("school"), d.get("conference"), d.get("coach_name"), d.get("title"), d.get("email")] for d in new_data]
             worksheet.append_rows(rows)
             st.success("Success!")
-            time.sleep(1); st.rerun()---
+            time.sleep(1)
+            st.rerun()### 2. Add the Secrets (Since you missed them earlier)
+Since the app is already "deployed" (even if it has an error), you can still add the secrets:
 
-### Step 2: Launch the App on Streamlit
-1.  Go to [share.streamlit.io](https://share.streamlit.io/).
-2.  Click **"Continue with GitHub"** and log in with your work account.
-3.  Click **"Create app"** (the blue button in the top right).
-4.  Select your repository (`hlord-ship-it/coach-contacts-app`), set the branch to `main`, and the file path to `app.py`.
-5.  **Before you click Deploy**, look for the **"Advanced settings"** link at the bottom.
-
----
-
-### Step 3: The Secrets Menu
-1.  When you click **Advanced settings**, a text box called **"Secrets"** will appear.
-2.  **Copy and paste everything below** into that box:
+1.  Go to your [Streamlit Dashboard](https://share.streamlit.io/).
+2.  Find your `coach-contacts-app` in the list.
+3.  Click the **three dots (⋮)** next to your app and select **"Settings"**.
+4.  On the left sidebar, click **"Secrets"**.
+5.  **Paste the block of code below** into that text area and click **Save**:
 
 GEMINI_API_KEY = "AIzaSyBNA7b7G8Km2Tb8eyXw95Q6n7SwIjDtr4k"
 SHEET_URL = "https://docs.google.com/spreadsheets/d/11OTvUva_7ghPOioXUvaxjwYOHPpV-jjc4Ow6gLPsYPA/edit"
@@ -100,7 +95,4 @@ client_id = "116014310838930128813"
 auth_uri = "https://accounts.google.com/o/oauth2/auth"
 token_uri = "https://oauth2.googleapis.com/token"
 auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/data-bot%40coach-finder-app-483715.iam.gserviceaccount.com"3.  Click **Save**.
-4.  Now click **Deploy!**
-
-Streamlit will now install the software, connect to your Google Sheet using those "Secrets," and give you a live URL you can send to your colleagues. No more security warnings
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/data-bot%40coach-finder-app-483715.iam.gserviceaccount.com"Once you save the secrets and update the code on GitHub, your app will automatically restart and should work perfectly
