@@ -25,30 +25,37 @@ def connect_services():
     except Exception as e:
         return None
 
-# --- 2. DYNAMIC MODEL LOADER ---
-# This function asks Google what models are ACTUALLY available to you
-def get_available_models():
+# --- 2. DYNAMIC MODEL LOADER (FILTERED) ---
+def get_safe_models():
+    """
+    Only returns Gemini 1.5 models. 
+    Gemini 2.0 requires a different tool structure that crashes this library version.
+    """
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        models = []
+        valid_models = []
         for m in genai.list_models():
-            # Filter for models that generate text
             if 'generateContent' in m.supported_generation_methods:
-                # specific clean up to remove "models/" prefix
                 name = m.name.replace("models/", "")
-                models.append(name)
-        return sorted(models)
+                # STRICT FILTER: Only allow 1.5 models to prevent "Tool" crashes
+                if "gemini-1.5" in name:
+                    valid_models.append(name)
+        
+        # If list is empty (rare), force the generic alias
+        if not valid_models:
+            return ["gemini-1.5-flash"]
+            
+        return sorted(valid_models)
     except Exception as e:
-        st.error(f"API Key Error: {e}")
-        return ["gemini-1.5-flash"] # Fallback
+        # Fallback if listing fails
+        return ["gemini-1.5-flash"]
 
 # --- 3. AI AGENT ---
 def run_agent(sport, conference, selected_model_name):
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # We use the standard 1.5 tool definition
-        # This is safe for 'gemini-1.5-flash' and 'gemini-1.5-pro'
+        # This tool definition works ONLY with Gemini 1.5
         tools = [
             {"google_search_retrieval": {
                 "dynamic_retrieval_config": {
@@ -58,7 +65,6 @@ def run_agent(sport, conference, selected_model_name):
             }}
         ]
         
-        # Use the user-selected model from the sidebar
         model = genai.GenerativeModel(selected_model_name, tools=tools)
         
     except Exception as e:
@@ -92,7 +98,6 @@ def run_agent(sport, conference, selected_model_name):
     
     except Exception as e:
         st.error(f"Execution Error: {e}")
-        st.caption("Try selecting a different model in the sidebar.")
         return []
 
 # --- 4. APP INTERFACE ---
@@ -100,16 +105,16 @@ def run_agent(sport, conference, selected_model_name):
 with st.sidebar:
     st.header("🎛️ Settings")
     
-    # LOAD MODELS DYNAMICALLY
-    available_models = get_available_models()
+    # LOAD ONLY SAFE MODELS
+    safe_models = get_safe_models()
     
-    # Try to default to 'gemini-1.5-flash' if it exists in the list
+    # Default to Flash if available (faster/cheaper)
     default_index = 0
-    if "gemini-1.5-flash" in available_models:
-        default_index = available_models.index("gemini-1.5-flash")
+    if "gemini-1.5-flash" in safe_models:
+        default_index = safe_models.index("gemini-1.5-flash")
         
-    model_choice = st.selectbox("Select AI Model", available_models, index=default_index)
-    st.caption(f"Connected: {len(available_models)} models found.")
+    model_choice = st.selectbox("Select AI Model", safe_models, index=default_index)
+    st.caption("Note: Gemini 2.0 models hidden to prevent compatibility errors.")
 
     st.divider()
     
