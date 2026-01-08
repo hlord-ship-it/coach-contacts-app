@@ -2,143 +2,163 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import google.generativeai as genai
 import json
+import requests
 import time
 
-# --- PAGE CONFIG ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Athletic Strategy DB", layout="wide", page_icon="🏅")
 
-# --- 1. SETUP & AUTHENTICATION ---
+# --- 2. GOOGLE SHEETS AUTHENTICATION ---
 @st.cache_resource
-def connect_services():
+def get_google_sheet():
+    """Authenticates and returns the first worksheet of the specified Google Sheet."""
     try:
-        if "gcp_service_account" not in st.secrets:
-            return None
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        sheet_url = st.secrets["SHEET_URL"]
-        return client.open_by_url(sheet_url).sheet1
-    except Exception as e:
-        return None
-
-# --- 2. AI AGENT (Gemini 2.0 Fix) ---
-def run_agent(sport, conference):
-    try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Load credentials from Streamlit Secrets
+        creds_info = dict(st.secrets["gcp_service_account"])
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
         
-        # WE ARE USING GEMINI 2.0
-        # This is the only model your account seems to have access to (based on previous errors).
-        model_name = "gemini-2.0-flash-exp"
-        
-        # --- THE FIX ---
-        # Instead of using 'genai.protos' (which crashed), we use a raw dictionary.
-        # We use the key 'google_search' which Gemini 2.0 specifically requested.
-        tools = [
-            {'google_search': {}} 
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
         ]
         
-        model = genai.GenerativeModel(model_name, tools=tools)
+        creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+        client = gspread.authorize(creds)
         
+        # Open by URL from secrets
+        sheet = client.open_by_url(st.secrets["SHEET_URL"])
+        return sheet.get_worksheet(0) # Returns the first tab
     except Exception as e:
-        st.error(f"Configuration Error: {e}")
-        return []
+        st.sidebar.error(f"Google Sheets Connection Error: {e}")
+        return None
 
-    st.info(f"🤖 Agent (using {model_name}) is searching Google for {conference} {sport}...")
+# --- 3. THE AI RESEARCH AGENT (DIRECT REST) ---
+def run_research_agent(sport, conference):
+    """Calls Gemini 2.0 Flash via REST to find coaching staff using Google Search."""
+    api_key = st.secrets["GEMINI_API_KEY"]
     
-    prompt = f"""
-    Find the 2025 coaching staff directory for {sport} in the {conference} conference.
-    For every university in the conference, list the Head Coach and Assistant Coaches.
+    # We use v1beta to access the gemini-2.0-flash model and google_search tool
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
-    Return the data as a JSON list. 
-    Format: [{{"school": "University Name", "coach_name": "Name", "title": "Head/Assistant", "email": "Email or 'Not Listed'"}}]
-    """
+    headers = {'Content-Type': 'application/json'}
     
+    # Constructing the raw payload to bypass SDK validation
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": (
+                    f"Research the 2025 coaching staff for {sport} in the {conference} conference. "
+                    "For every university in the conference, find the Head Coach and Assistant Coaches. "
+                    "Return the results as a JSON list of objects with these keys: "
+                    "school, coach_name, title, email. If email is not found, use 'Not Listed'."
+                )
+            }]
+        }],
+        "tools": [
+            {"google_search": {}} # This triggers the search grounding
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "temperature": 0.0
+        }
+    }
+
     try:
-        response = model.generate_content(prompt)
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
         
-        st.info("🔄 Parsing results...")
+        if response.status_code != 200:
+            st.error(f"Google API Error {response.status_code}: {response.text}")
+            return None
         
-        raw_text = response.text
-        clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+        # Extract the JSON string from the response
+        res_data = response.json()
+        raw_output = res_data['candidates'][0]['content']['parts'][0]['text']
         
-        start = clean_text.find("[")
-        end = clean_text.rfind("]") + 1
-        if start != -1 and end != -1:
-            clean_text = clean_text[start:end]
-            
-        return json.loads(clean_text)
-    
+        # Parse the JSON string into a Python list
+        return json.loads(raw_output)
+        
     except Exception as e:
-        st.error(f"Execution Error: {e}")
-        st.caption("If this fails, your API key might not have 'Vertex AI' enabled properly.")
-        return []
+        st.error(f"Research Agent failed: {e}")
+        return None
 
-# --- 3. APP INTERFACE ---
-
-with st.sidebar:
-    st.header("🎛️ Settings")
-    st.info("Using Model: gemini-2.0-flash-exp")
-    
-    st.divider()
-    
-    worksheet = connect_services()
-    df_history = pd.DataFrame()
-    if worksheet:
-        try:
-            data = worksheet.get_all_records()
-            df_history = pd.DataFrame(data)
-        except: pass
-
-    selected_filter = "Show All"
-    if not df_history.empty and "conference" in df_history.columns:
-        pairs = df_history[["conference", "sport"]].drop_duplicates()
-        options = ["Show All"] + [f"{r.conference} - {r.sport}" for i, r in pairs.iterrows()]
-        selected_filter = st.radio("Load Database:", options)
-
+# --- 4. STREAMLIT UI ---
 st.title("🏆 Athletic Strategy Database")
+st.markdown("Automated coaching staff discovery via Gemini 2.0 Search Grounding.")
 
-tab1, tab2 = st.tabs(["🔍 Find New Coaches", "📂 View Database"])
+tab1, tab2 = st.tabs(["🔍 Find New Staff", "📂 Database History"])
 
 with tab1:
+    # User Inputs
     col1, col2 = st.columns(2)
     with col1:
-        target_sport = st.selectbox("Sport", ["Men's Track & Field", "Women's Track & Field", "Men's Soccer", "Women's Soccer", "Football", "Men's Basketball"])
+        target_sport = st.selectbox("Select Sport", 
+            ["Men's Soccer", "Women's Soccer", "Football", "Men's Basketball", "Women's Basketball", "Track & Field"])
     with col2:
-        target_conf = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial"])
+        target_conf = st.selectbox("Select Conference", 
+            ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial", "Ivy League"])
 
-    if st.button(f"🚀 Find {target_conf} Coaches"):
-        with st.spinner("Connecting..."):
-            new_data = run_agent(target_sport, target_conf)
-            
-            if new_data:
-                st.success(f"Found {len(new_data)} coaches!")
-                st.dataframe(new_data)
+    if st.button("🚀 Run Research Agent"):
+        if not st.secrets.get("GEMINI_API_KEY"):
+            st.error("Missing Gemini API Key in secrets!")
+        else:
+            with st.spinner(f"Agent is browsing the web for {target_conf} {target_sport} staff..."):
+                results = run_research_agent(target_sport, target_conf)
                 
-                if worksheet:
-                    rows = [[target_sport, target_conf, d.get("school"), d.get("coach_name"), d.get("title"), d.get("email")] for d in new_data]
-                    try:
-                        worksheet.append_rows(rows)
-                        st.toast("✅ Saved!")
-                        time.sleep(2)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Save Error: {e}")
-            else:
-                st.warning("No data found.")
+                if results:
+                    st.success(f"Found {len(results)} staff members!")
+                    df = pd.DataFrame(results)
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # Sync to Google Sheets
+                    worksheet = get_google_sheet()
+                    if worksheet:
+                        # Prepare rows for append (Sport, Conference, School, Name, Title, Email)
+                        rows_to_add = [
+                            [target_sport, target_conf, r.get('school'), r.get('coach_name'), r.get('title'), r.get('email')] 
+                            for r in results
+                        ]
+                        try:
+                            worksheet.append_rows(rows_to_add)
+                            st.toast("✅ Database synced to Google Sheets!")
+                        except Exception as e:
+                            st.error(f"Failed to write to Sheet: {e}")
+                else:
+                    st.warning("No data was returned. The agent may have encountered a search restriction.")
 
 with tab2:
-    if df_history.empty:
-        st.info("Database is empty.")
+    st.subheader("Current Database Records")
+    worksheet = get_google_sheet()
+    if worksheet:
+        try:
+            # Pull existing data
+            data = worksheet.get_all_records()
+            if data:
+                history_df = pd.DataFrame(data)
+                st.dataframe(history_df, use_container_width=True)
+                
+                # Simple CSV Download
+                csv = history_df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download Database as CSV", data=csv, file_name="athletic_db_export.csv", mime="text/csv")
+            else:
+                st.info("The database is currently empty.")
+        except Exception as e:
+            st.error(f"Could not load history: {e}")
     else:
-        display_df = df_history.copy()
-        if selected_filter != "Show All":
-            f_conf, f_sport = selected_filter.split(" - ", 1)
-            display_df = display_df[
-                (display_df["conference"] == f_conf) & 
-                (display_df["sport"] == f_sport)
-            ]
-        st.dataframe(display_df, use_container_width=True)
+        st.warning("Google Sheets connection is not configured.")
+
+# --- 5. SIDEBAR DIAGNOSTICS ---
+with st.sidebar:
+    st.header("⚙️ System Status")
+    if st.secrets.get("GEMINI_API_KEY"):
+        st.write("✅ Gemini API: Connected")
+    else:
+        st.write("❌ Gemini API: Missing")
+        
+    if get_google_sheet():
+        st.write("✅ Google Sheets: Connected")
+    else:
+        st.write("❌ Google Sheets: Missing")
+    
+    st.divider()
+    st.caption("v1.2.0 | Gemini 2.0 Flash | Grounding Enabled")
