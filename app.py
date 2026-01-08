@@ -30,27 +30,33 @@ def connect_services():
     except Exception as e:
         return None
 
-# --- 2. AI AGENT (With Explicit Gemini 2.0 Search Tool) ---
-def run_agent(sport, conference, model_name):
+# --- 2. AI AGENT (Standard 1.5 Pro Implementation) ---
+def run_agent(sport, conference):
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # --- THE FIX ---
-        # Gemini 2.0 requires the 'google_search' field (not retrieval).
-        # We construct the Tool object manually to bypass SDK validation checks.
-        tool_config = genai.protos.Tool(
-            google_search=genai.protos.GoogleSearch()
-        )
+        # WE ARE USING THE STABLE 1.5 PRO MODEL
+        # This matches the library version you have installed.
+        model_name = "gemini-1.5-pro-002"
         
-        model = genai.GenerativeModel(model_name, tools=[tool_config])
+        # This is the "Old Reliable" search tool definition
+        tools = [
+            {"google_search_retrieval": {
+                "dynamic_retrieval_config": {
+                    "mode": "dynamic",
+                    "dynamic_threshold": 0.7,
+                }
+            }}
+        ]
+        
+        model = genai.GenerativeModel(model_name, tools=tools)
         
     except Exception as e:
         st.error(f"Error configuring AI: {e}")
         return []
 
     # 2. Execution Phase
-    status_text = f"🤖 Agent is using Google Search to find {conference} {sport} coaches..."
-    st.info(status_text)
+    st.info(f"🤖 Agent is using Google Search (via {model_name}) to find {conference} {sport} coaches...")
     
     prompt = f"""
     Find the 2025 coaching staff directory for {sport} in the {conference} conference.
@@ -68,9 +74,10 @@ def run_agent(sport, conference, model_name):
         st.info("🔄 Parsing coach data...")
         
         raw_text = response.text
+        # Clean markdown
         clean_text = raw_text.replace("```json", "").replace("```", "").strip()
         
-        # Attempt to find the list start/end
+        # Extract JSON array
         start = clean_text.find("[")
         end = clean_text.rfind("]") + 1
         if start != -1 and end != -1:
@@ -86,13 +93,7 @@ def run_agent(sport, conference, model_name):
 
 with st.sidebar:
     st.header("🎛️ Settings")
-    
-    # gemini-2.0-flash-exp is the best balance of speed and search capability
-    model_name = st.selectbox(
-        "Select AI Model", 
-        ["gemini-2.0-flash-exp", "gemini-1.5-pro-002"],
-        index=0
-    )
+    st.info("Using Stable Model: gemini-1.5-pro-002")
     
     st.divider()
     st.subheader("📚 Saved Reports")
@@ -126,7 +127,7 @@ with tab1:
 
     if st.button(f"🚀 Find {target_conf} Coaches"):
         with st.spinner("Connecting to Google Search..."):
-            new_data = run_agent(target_sport, target_conf, model_name)
+            new_data = run_agent(target_sport, target_conf)
             
             if new_data:
                 st.success(f"Found {len(new_data)} coaches!")
@@ -152,7 +153,7 @@ with tab1:
                     except Exception as e:
                         st.error(f"Error saving to sheet: {e}")
             else:
-                st.warning("No data found. Try a different model in the sidebar.")
+                st.warning("No data found.")
 
 with tab2:
     if df_history.empty:
