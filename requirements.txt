@@ -1,6 +1,5 @@
 streamlit
 pandas
 gspread
-google-generativeai>=0.8.3
 google-auth
-duckduckgo-search>=6.0.0
+google-generativeai>=0.8.3
