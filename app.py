@@ -30,20 +30,16 @@ def connect_services():
     except Exception as e:
         return None
 
-# --- 2. AI AGENT (With Explicit Google Search) ---
+# --- 2. AI AGENT (With Explicit Gemini 2.0 Search Tool) ---
 def run_agent(sport, conference, model_name):
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
         # --- THE FIX ---
-        # We use the explicit 'Protos' definition to avoid syntax errors.
-        # This tells the API strictly: "Use the Google Search Retrieval tool"
+        # Gemini 2.0 requires the 'google_search' field (not retrieval).
+        # We construct the Tool object manually to bypass SDK validation checks.
         tool_config = genai.protos.Tool(
-            google_search_retrieval=genai.protos.GoogleSearchRetrieval(
-                dynamic_retrieval_config=genai.protos.DynamicRetrievalConfig(
-                    mode=genai.protos.DynamicRetrievalConfig.Mode.MODE_DYNAMIC
-                )
-            )
+            google_search=genai.protos.GoogleSearch()
         )
         
         model = genai.GenerativeModel(model_name, tools=[tool_config])
@@ -84,7 +80,6 @@ def run_agent(sport, conference, model_name):
     
     except Exception as e:
         st.error(f"Agent Error: {e}")
-        st.caption("If this persists, try switching to 'gemini-1.5-pro' in the sidebar.")
         return []
 
 # --- 3. APP INTERFACE ---
@@ -95,7 +90,7 @@ with st.sidebar:
     # gemini-2.0-flash-exp is the best balance of speed and search capability
     model_name = st.selectbox(
         "Select AI Model", 
-        ["gemini-2.0-flash-exp", "gemini-1.5-pro-002", "gemini-1.5-flash-002"],
+        ["gemini-2.0-flash-exp", "gemini-1.5-pro-002"],
         index=0
     )
     
@@ -170,4 +165,4 @@ with tab2:
                 (display_df["conference"] == f_conf) & 
                 (display_df["sport"] == f_sport)
             ]
-        st.dataframe(display_df, use_container_width=True) 
+        st.dataframe(display_df, use_container_width=True)
