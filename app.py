@@ -1,219 +1,124 @@
-import json
-import time
-
-import gspread
-import pandas as pd
-import requests
 import streamlit as st
+import pandas as pd
+import gspread
 from google.oauth2.service_account import Credentials
+import json
+import requests
+import re
 
-# --- PAGE CONFIG ---
+# --- 1. SETUP & UI ---
 st.set_page_config(page_title="Athletic Strategy DB", layout="wide", page_icon="🏅")
 
-# #region agent log
-def _log(hypothesis_id: str, location: str, message: str, data: dict | None = None) -> None:
-    """Write NDJSON logs locally for debug mode. Never log secrets."""
+def robust_json_extract(text):
+    """Ensures we get a clean JSON list even if the AI adds text or markdown."""
     try:
-        payload = {
-            "sessionId": "debug-session",
-            "runId": "run1",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(
-            "/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log", "a"
-        ) as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        return json.loads(text)
+    except:
+        return None
 
-
-_log("A", "app.py:29", "App loaded")
-# #endregion
-
-# --- 1. SHEETS AUTH ---
-@st.cache_resource
-def get_worksheet():
-    _log("B", "app.py:36", "Connecting to Google Sheets (no secrets logged)")
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(creds)
-    sh = client.open_by_url(st.secrets["SHEET_URL"])
-    ws = sh.sheet1
-    _log("B", "app.py:51", "Connected to Google Sheet")
-    return ws
-
-
-def ensure_headers(ws) -> None:
-    expected = ["timestamp", "sport", "conference", "school", "coach_name", "title", "email"]
+# --- 2. THE EYES: SERPER.DEV SEARCH ---
+def get_serper_data(sport, conference):
+    """Fetches the top Google results for the specific coaching staff."""
+    url = "https://google.serper.dev/search"
+    # We target the 'Staff Directory' specifically to get the best snippets
+    query = f"2025 {sport} coaching staff directory {conference} conference .edu"
+    
+    payload = json.dumps({"q": query, "num": 10})
+    headers = {
+        'X-API-KEY': st.secrets["SERPER_API_KEY"],
+        'Content-Type': 'application/json'
+    }
+    
     try:
-        current = ws.row_values(1)
-        if not current:
-            ws.append_row(expected)
-            _log("C", "app.py:61", "Headers created", {"cols": len(expected)})
+        response = requests.post(url, headers=headers, data=payload, timeout=15)
+        response.raise_for_status()
+        return response.json().get('organic', [])
     except Exception as e:
-        _log("C", "app.py:64", "Header check failed", {"error": str(e)})
-
-
-# --- 2. GEMINI VIA RAW HTTP (v1beta) ---
-def _extract_json_list(text: str) -> list[dict]:
-    """Parse a JSON list from model output; falls back to bracket extraction."""
-    if not text:
-        return []
-    s = text.strip()
-    # If the model wraps in code fences, strip them
-    s = s.replace("```json", "").replace("```", "").strip()
-    try:
-        data = json.loads(s)
-        return data if isinstance(data, list) else []
-    except Exception:
-        start = s.find("[")
-        end = s.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            try:
-                data = json.loads(s[start : end + 1])
-                return data if isinstance(data, list) else []
-            except Exception:
-                return []
+        st.error(f"Search failed: {e}")
         return []
 
+# --- 3. THE BRAIN: GEMINI EXTRACTION ---
+def extract_coaches(search_hits, sport, conference):
+    """Feeds search snippets to Gemini to structure into JSON."""
+    api_key = st.secrets["GEMINI_API_KEY"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    
+    # Format the search results into a context block
+    context = ""
+    for i, hit in enumerate(search_hits):
+        context += f"SOURCE {i+1}: {hit.get('link')}\nTITLE: {hit.get('title')}\nSNIPPET: {hit.get('snippet')}\n\n"
 
-def run_agent(sport: str, conference: str) -> list[dict]:
-    """Calls Gemini 2.0 Flash with Google Search grounding via raw HTTP."""
-    # Strip to avoid invisible whitespace/newlines breaking requests/URL parsing.
-    api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
-
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-
-    prompt = f"""
-You are a research agent. Use live web search.
-
-Task:
-- Find the 2025-2026 {sport} coaching staff for every school in the {conference} conference.
-- Include Head Coach and Assistants where available.
-
-Return ONLY a strict JSON array (no markdown) where each item is:
-{{"school": "...", "coach_name": "...", "title": "...", "email": "Email or Not Listed"}}
-"""
+    prompt = (
+        f"You are a sports data analyst. Based on the search results below, find the 2025 coaching staff "
+        f"for {sport} in the {conference}. \n\n"
+        "Instructions:\n"
+        "1. Identify the School, Coach Name, Title, and Email from the snippets.\n"
+        "2. If an email is not in the snippet, check the URL—if it's a staff directory, list the email as 'Visit Source'.\n"
+        "3. Return ONLY a JSON list of objects.\n\n"
+        f"SEARCH RESULTS:\n{context}"
+    )
 
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.2,
-        },
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
     }
 
-    _log("D", "app.py:132", "Gemini request starting", {"sport": sport, "conference": conference})
     try:
-        # Pass key as a query param to avoid malformed URLs if api_key has whitespace.
-        resp = requests.post(url, params={"key": api_key}, json=payload, timeout=(15, 90))
-        _log("D", "app.py:135", "Gemini response received", {"status": resp.status_code})
+        response = requests.post(url, json=payload, timeout=60)
+        res_data = response.json()
+        raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
+        return robust_json_extract(raw_text)
     except Exception as e:
-        # Never leak secrets. Sanitize any accidental echo of the key.
-        safe_msg = str(e).replace(api_key, "[REDACTED]") if api_key else str(e)
-        _log("D", "app.py:137", "Gemini request failed", {"errorType": type(e).__name__, "error": safe_msg[:500]})
-        raise RuntimeError(f"API Request Failed (network/request error): {type(e).__name__}: {safe_msg}") from e
+        st.error(f"Extraction failed: {e}")
+        return None
 
-    if resp.status_code != 200:
-        # Surface the actual Google error message to debug 403 quickly.
-        detail = resp.text[:1200]  # keep it short for UI/logs
-        raise RuntimeError(f"API Request Failed (HTTP {resp.status_code}): {detail}")
+# --- 4. GOOGLE SHEETS SYNC ---
+def sync_to_sheets(data, sport, conference):
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
+        ws = gspread.authorize(creds).open_by_url(st.secrets["SHEET_URL"]).get_worksheet(0)
+        
+        rows = [[sport, conference, r.get('school'), r.get('coach_name'), r.get('title'), r.get('email')] for r in data]
+        ws.append_rows(rows)
+        return True
+    except Exception as e:
+        st.sidebar.error(f"Sheets Sync Error: {e}")
+        return False
 
-    data = resp.json()
-    # Typical response shape: candidates[0].content.parts[0].text
-    parts = (
-        data.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [{}])
-    )
-    text = parts[0].get("text", "") if parts else ""
+# --- 5. APP INTERFACE ---
+st.title("🏆 Athletic Strategy DB (Serper Mode)")
 
-    results = _extract_json_list(text)
-    _log("E", "app.py:163", "Parsed model output", {"items": len(results)})
+col1, col2 = st.columns(2)
+with col1: sport_input = st.selectbox("Sport", ["Men's Soccer", "Women's Soccer", "Football", "Basketball"])
+with col2: conf_input = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "Ivy League"])
 
-    # Normalize + validate minimal shape
-    cleaned: list[dict] = []
-    for r in results:
-        if not isinstance(r, dict):
-            continue
-        cleaned.append(
-            {
-                "school": str(r.get("school", "")).strip(),
-                "coach_name": str(r.get("coach_name", "")).strip(),
-                "title": str(r.get("title", "")).strip(),
-                "email": str(r.get("email", "")).strip() or "Not Listed",
-            }
-        )
-    return [c for c in cleaned if c["school"] and c["coach_name"]]
-
-
-# --- 3. UI ---
-st.title("🏆 Athletic Strategy Database Agent")
-
-ws = None
-df_history = pd.DataFrame()
-try:
-    ws = get_worksheet()
-    ensure_headers(ws)
-    df_history = pd.DataFrame(ws.get_all_records())
-except Exception as e:
-    _log("B", "app.py:196", "Sheets init failed", {"error": str(e)})
-    st.warning("Google Sheet connection failed. Double-check Streamlit Secrets and Sheet sharing.")
-
-tab1, tab2 = st.tabs(["🔍 Research", "📂 History"])
-
-with tab1:
-    col1, col2 = st.columns(2)
-    with col1:
-        sport = st.selectbox(
-            "Sport",
-            ["Men's Soccer", "Women's Soccer", "Men's Track & Field", "Women's Track & Field", "Football", "Men's Basketball"],
-        )
-    with col2:
-        conference = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial", "MIAC"])
-
-    if st.button("🚀 Run Search Agent", type="primary"):
-        with st.spinner("Searching Google..."):
-            try:
-                rows = run_agent(sport, conference)
-            except Exception as e:
-                st.error(str(e))
-                rows = []
-
-        if rows:
-            st.success(f"Found {len(rows)} coaches.")
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-            if ws is not None:
-                ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                append_rows = [
-                    [ts, sport, conference, r["school"], r["coach_name"], r["title"], r["email"]]
-                    for r in rows
-                ]
-                try:
-                    ws.append_rows(append_rows)
-                    _log("F", "app.py:236", "Appended rows to sheet", {"rows": len(append_rows)})
-                    st.toast("✅ Saved to Google Sheet")
-                    st.rerun()
-                except Exception as e:
-                    _log("F", "app.py:241", "Append failed", {"error": str(e)})
-                    st.error(f"Error saving to sheet: {e}")
+if st.button("🚀 Run Data Pipeline"):
+    with st.status("Gathering Intelligence...", expanded=True) as status:
+        # Step 1: Deterministic Search
+        st.write("🔍 Querying Google via Serper.dev...")
+        hits = get_serper_data(sport_input, conf_input)
+        
+        if not hits:
+            status.update(label="Search Failed", state="error")
+            st.stop()
+            
+        # Step 2: Intelligent Extraction
+        st.write(f"🧠 Analyzing {len(hits)} sources with Gemini 2.0...")
+        extracted_data = extract_coaches(hits, sport_input, conf_input)
+        
+        if extracted_data:
+            st.write(f"✅ Extracted {len(extracted_data)} records.")
+            st.dataframe(pd.DataFrame(extracted_data), use_container_width=True)
+            
+            # Step 3: Database Sync
+            st.write("📝 Syncing to Google Sheets...")
+            if sync_to_sheets(extracted_data, sport_input, conf_input):
+                status.update(label="Pipeline Complete!", state="complete")
+                st.toast("Database updated!")
         else:
-            st.info("No results returned. Try again or choose a different conference/sport.")
-
-with tab2:
-    if df_history.empty:
-        st.info("No history yet (or sheet connection failed).")
-    else:
-        st.dataframe(df_history, use_container_width=True)
+            status.update(label="Extraction Failed", state="error")
