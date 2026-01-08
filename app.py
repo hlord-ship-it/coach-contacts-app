@@ -4,121 +4,118 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import requests
+import time
 import re
 
-# --- 1. SETUP & UI ---
-st.set_page_config(page_title="Athletic Strategy DB", layout="wide", page_icon="🏅")
+# --- 1. CORE CONFIGURATION ---
+st.set_page_config(page_title="Global Athletic Harvester", layout="wide")
 
 def robust_json_extract(text):
-    """Ensures we get a clean JSON list even if the AI adds text or markdown."""
     try:
         match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
+        if match: return json.loads(match.group(0))
         return json.loads(text)
-    except:
-        return None
+    except: return None
 
-# --- 2. THE EYES: SERPER.DEV SEARCH ---
-def get_serper_data(sport, conference):
-    """Fetches the top Google results for the specific coaching staff."""
-    url = "https://google.serper.dev/search"
-    # We target the 'Staff Directory' specifically to get the best snippets
-    query = f"2025 {sport} coaching staff directory {conference} conference .edu"
-    
-    payload = json.dumps({"q": query, "num": 10})
-    headers = {
-        'X-API-KEY': st.secrets["SERPER_API_KEY"],
-        'Content-Type': 'application/json'
-    }
-    
-    try:
-        response = requests.post(url, headers=headers, data=payload, timeout=15)
-        response.raise_for_status()
-        return response.json().get('organic', [])
-    except Exception as e:
-        st.error(f"Search failed: {e}")
-        return []
-
-# --- 3. THE BRAIN: GEMINI EXTRACTION ---
-def extract_coaches(search_hits, sport, conference):
-    """Feeds search snippets to Gemini to structure into JSON."""
-    api_key = st.secrets["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    
-    # Format the search results into a context block
-    context = ""
-    for i, hit in enumerate(search_hits):
-        context += f"SOURCE {i+1}: {hit.get('link')}\nTITLE: {hit.get('title')}\nSNIPPET: {hit.get('snippet')}\n\n"
-
-    prompt = (
-        f"You are a sports data analyst. Based on the search results below, find the 2025 coaching staff "
-        f"for {sport} in the {conference}. \n\n"
-        "Instructions:\n"
-        "1. Identify the School, Coach Name, Title, and Email from the snippets.\n"
-        "2. If an email is not in the snippet, check the URL—if it's a staff directory, list the email as 'Visit Source'.\n"
-        "3. Return ONLY a JSON list of objects.\n\n"
-        f"SEARCH RESULTS:\n{context}"
-    )
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json", "temperature": 0.0}
-    }
-
-    try:
-        response = requests.post(url, json=payload, timeout=60)
-        res_data = response.json()
-        raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
-        return robust_json_extract(raw_text)
-    except Exception as e:
-        st.error(f"Extraction failed: {e}")
-        return None
-
-# --- 4. GOOGLE SHEETS SYNC ---
-def sync_to_sheets(data, sport, conference):
+# --- 2. DYNAMIC MAP LOADING ---
+@st.cache_data(ttl=600) # Refreshes every 10 minutes
+def load_config_from_sheets():
+    """Reads the 'Config_Map' tab to build the UI menus."""
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
-        ws = gspread.authorize(creds).open_by_url(st.secrets["SHEET_URL"]).get_worksheet(0)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets'])
+        gc = gspread.authorize(creds)
         
-        rows = [[sport, conference, r.get('school'), r.get('coach_name'), r.get('title'), r.get('email')] for r in data]
-        ws.append_rows(rows)
-        return True
+        # Access the 'Config_Map' tab
+        sh = gc.open_by_url(st.secrets["SHEET_URL"])
+        worksheet = sh.worksheet("Config_Map")
+        df = pd.DataFrame(worksheet.get_all_records())
+        return df
     except Exception as e:
-        st.sidebar.error(f"Sheets Sync Error: {e}")
-        return False
+        st.error(f"Error loading Config_Map: {e}")
+        return pd.DataFrame()
 
-# --- 5. APP INTERFACE ---
-st.title("🏆 Athletic Strategy DB (Serper Mode)")
+# --- 3. PIPELINE COMPONENTS ---
+def get_school_directory_url(school, sport):
+    """Search for the specific directory URL."""
+    url = "https://google.serper.dev/search"
+    query = f"{school} {sport} coaching staff directory .edu"
+    headers = {'X-API-KEY': st.secrets["SERPER_API_KEY"], 'Content-Type': 'application/json'}
+    payload = json.dumps({"q": query, "num": 3})
+    
+    res = requests.post(url, headers=headers, data=payload)
+    results = res.json().get('organic', [])
+    return results[0].get('link') if results else None
 
-col1, col2 = st.columns(2)
-with col1: sport_input = st.selectbox("Sport", ["Men's Soccer", "Women's Soccer", "Football", "Basketball"])
-with col2: conf_input = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "Ivy League"])
+def scrape_and_extract(url, school, sport):
+    """Scrapes via Jina and extracts via Gemini."""
+    # Scrape
+    jina_text = requests.get(f"https://r.jina.ai/{url}").text
+    
+    # Extract
+    api_key = st.secrets["GEMINI_API_KEY"]
+    gem_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    
+    prompt = (
+        f"Extract a JSON list of {sport} coaches for {school} from this text. "
+        "Keys: school, coach_name, title, email. \n\n"
+        f"TEXT:\n{jina_text[:12000]}"
+    )
+    
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"response_mime_type": "application/json", "temperature": 0}
+    }
+    
+    res = requests.post(gem_url, json=payload)
+    try:
+        return robust_json_extract(res.json()['candidates'][0]['content']['parts'][0]['text'])
+    except: return []
 
-if st.button("🚀 Run Data Pipeline"):
-    with st.status("Gathering Intelligence...", expanded=True) as status:
-        # Step 1: Deterministic Search
-        st.write("🔍 Querying Google via Serper.dev...")
-        hits = get_serper_data(sport_input, conf_input)
+# --- 4. UI LOGIC ---
+st.title("🏆 NCAA Master Harvester")
+
+config_df = load_config_from_sheets()
+
+if not config_df.empty:
+    # 1. Select Division
+    divisions = sorted(config_df['Division'].unique())
+    selected_div = st.selectbox("Select Division", divisions)
+    
+    # 2. Select Conference (Filtered by Division)
+    conferences = sorted(config_df[config_df['Division'] == selected_div]['Conference'].unique())
+    selected_conf = st.selectbox("Select Conference", conferences)
+    
+    # 3. Select Sport
+    selected_sport = st.selectbox("Select Sport", ["Men's Soccer", "Women's Soccer", "Football", "Basketball", "Lacrosse"])
+
+    if st.button(f"🚀 Harvest {selected_conf} Data"):
+        # Get list of schools for this selection
+        target_schools = config_df[
+            (config_df['Division'] == selected_div) & 
+            (config_df['Conference'] == selected_conf)
+        ]['School'].tolist()
         
-        if not hits:
-            status.update(label="Search Failed", state="error")
-            st.stop()
-            
-        # Step 2: Intelligent Extraction
-        st.write(f"🧠 Analyzing {len(hits)} sources with Gemini 2.0...")
-        extracted_data = extract_coaches(hits, sport_input, conf_input)
+        st.write(f"Starting harvest for **{len(target_schools)} schools**...")
         
-        if extracted_data:
-            st.write(f"✅ Extracted {len(extracted_data)} records.")
-            st.dataframe(pd.DataFrame(extracted_data), use_container_width=True)
+        results_area = st.empty()
+        all_data = []
+        
+        progress = st.progress(0)
+        for i, school in enumerate(target_schools):
+            with st.status(f"Processing {school}...", expanded=False):
+                dir_url = get_school_directory_url(school, selected_sport)
+                if dir_url:
+                    data = scrape_and_extract(dir_url, school, selected_sport)
+                    if data:
+                        for entry in data: 
+                            entry['Division'] = selected_div
+                            entry['Conference'] = selected_conf
+                        all_data.extend(data)
+                        results_area.dataframe(pd.DataFrame(all_data), use_container_width=True)
             
-            # Step 3: Database Sync
-            st.write("📝 Syncing to Google Sheets...")
-            if sync_to_sheets(extracted_data, sport_input, conf_input):
-                status.update(label="Pipeline Complete!", state="complete")
-                st.toast("Database updated!")
-        else:
-            status.update(label="Extraction Failed", state="error")
+            progress.progress((i + 1) / len(target_schools))
+            time.sleep(1) # Safety delay
+            
+        st.success("Harvesting Complete!")
