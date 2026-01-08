@@ -126,13 +126,9 @@ Return ONLY a strict JSON array (no markdown) where each item is:
         raise RuntimeError(f"API Request Failed (network/request error): {type(e).__name__}: {safe_msg}") from e
 
     if resp.status_code != 200:
-        # Do NOT leak api_key; show only server message.
-        try:
-            err = resp.json()
-        except Exception:
-            err = {"text": resp.text[:500]}
-        _log("D", "app.py:146", "Gemini non-200", {"status": resp.status_code, "err": str(err)[:500]})
-        raise RuntimeError(f"API Request Failed (HTTP {resp.status_code}). Check Streamlit logs.")
+        # Surface the actual Google error message to debug 403 quickly.
+        detail = resp.text[:1200]  # keep it short for UI/logs
+        raise RuntimeError(f"API Request Failed (HTTP {resp.status_code}): {detail}")
 
     data = resp.json()
     # Typical response shape: candidates[0].content.parts[0].text
