@@ -5,66 +5,70 @@ from google.oauth2.service_account import Credentials
 import json
 import requests
 import re
-import time
 
-# --- 1. CONFIGURATION & UI SETUP ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Athletic Strategy DB", layout="wide", page_icon="🏅")
 
-def robust_json_extract(text):
-    """Surgically extracts JSON arrays from AI responses, handling markdown or filler text."""
+def clean_and_parse_json(text):
+    """
+    The most robust way to get JSON out of an LLM response.
+    Handles markdown fences, leading/trailing text, and encoding issues.
+    """
     try:
-        # Use regex to find the first '[' and last ']'
+        # 1. Strip whitespace
+        text = text.strip()
+        
+        # 2. Remove Markdown code blocks if present
+        # This regex removes ```json ... ``` or just ``` ... ```
+        text = re.sub(r'^```(?:json)?\s+', '', text)
+        text = re.sub(r'\s+```$', '', text)
+        
+        # 3. Find the actual JSON array [ ... ]
+        # This ignores any "Sure, here is your list" filler text
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
-            return json.loads(match.group(0))
+            json_str = match.group(0)
+            return json.loads(json_str)
+        
+        # 4. Fallback: try raw parse
         return json.loads(text)
     except Exception as e:
-        # Fallback: if it's a single object, try finding '{...}'
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return [json.loads(match.group(0))]
-        raise ValueError(f"Could not parse JSON from: {text[:100]}...")
+        st.error(f"Extraction Failed. AI output started with: {text[:50]}...")
+        raise ValueError(f"JSON Parse Error: {e}")
 
-# --- 2. GOOGLE SHEETS INTEGRATION ---
+# --- 2. GOOGLE SHEETS AUTH ---
 @st.cache_resource
-def get_worksheet():
-    """Connects to Google Sheets using Streamlit Secrets."""
+def get_gsheet():
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        
-        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        scopes = ['[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)', '[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)']
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
-        
-        sheet = client.open_by_url(st.secrets["SHEET_URL"])
-        return sheet.get_worksheet(0)
+        return client.open_by_url(st.secrets["SHEET_URL"]).get_worksheet(0)
     except Exception as e:
-        st.sidebar.error(f"Sheet Connection Failed: {e}")
+        st.sidebar.error(f"Sheet Error: {e}")
         return None
 
-# --- 3. THE RESEARCH ENGINE (GEMINI 2.0 FLASH) ---
+# --- 3. THE RESEARCH ENGINE ---
 def run_research_agent(sport, conference):
-    """Calls Gemini 2.0 via REST with Google Search Grounding enabled."""
     api_key = st.secrets["GEMINI_API_KEY"]
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=){api_key}"
     
-    # 2.0 Flash is the standard for fast search grounding in 2026
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    
+    # Force the model to be a data-miner
+    prompt = (
+        f"Act as a professional athletic directory researcher. "
+        f"Find the 2025 coaching staff for {sport} in the {conference} conference. "
+        "Visit every member school's athletic website. "
+        "Return a JSON list of objects with keys: school, coach_name, title, email. "
+        "Output ONLY the JSON array. NO markdown, NO backticks, NO text before or after."
+    )
+
     payload = {
-        "contents": [{
-            "parts": [{
-                "text": (
-                    f"Find the 2025 coaching staff for {sport} in the {conference} conference. "
-                    "Search for every school in the conference. Extract the school name, "
-                    "coach name, title (Head or Assistant), and email. "
-                    "Return ONLY a valid JSON list of objects."
-                )
-            }]
-        }],
-        "tools": [{"google_search": {}}], # Required field for 2.0 Grounding
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
         "generationConfig": {
-            "response_mime_type": "application/json",
+            "response_mime_type": "application/json", # This is the magic setting
             "temperature": 0.0,
             "max_output_tokens": 8192
         }
@@ -72,63 +76,47 @@ def run_research_agent(sport, conference):
 
     try:
         response = requests.post(url, json=payload, timeout=120)
-        res_json = response.json()
+        res_data = response.json()
         
-        # Check for candidates (Standard Google API structure)
-        if 'candidates' in res_json and res_json['candidates'][0]['content'].get('parts'):
-            raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
-            return robust_json_extract(raw_text)
+        # Debugging: See what the AI actually said in the sidebar
+        with st.sidebar.expander("AI Raw Response"):
+            st.write(res_data)
+
+        if 'candidates' in res_data:
+            raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
+            return clean_and_parse_json(raw_text)
         else:
-            st.error(f"API Error: {res_json}")
+            st.error("Model refused to answer or found no data.")
             return None
     except Exception as e:
-        st.error(f"Agent Request Failed: {e}")
+        st.error(f"API Request Failed: {e}")
         return None
 
-# --- 4. MAIN APPLICATION UI ---
+# --- 4. STREAMLIT UI ---
 st.title("🏆 Athletic Strategy Research Agent")
-st.markdown("Automated 2025 Staff Discovery Powered by Gemini 2.0 Search Grounding")
 
-tab1, tab2 = st.tabs(["🔍 Search & Extract", "📂 Database View"])
+col1, col2 = st.columns(2)
+with col1: sport = st.selectbox("Sport", ["Men's Soccer", "Women's Soccer", "Football", "Basketball", "Track & Field"])
+with col2: conf = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial"])
 
-with tab1:
-    col1, col2 = st.columns(2)
-    with col1:
-        sport = st.selectbox("Sport", ["Men's Soccer", "Women's Soccer", "Football", "Basketball", "Track & Field"])
-    with col2:
-        conf = st.selectbox("Conference", ["NESCAC", "UAA", "SCIAC", "Liberty League", "WIAC", "Centennial", "Ivy League"])
-
-    if st.button("🚀 Execute Research"):
-        with st.spinner(f"Agent is searching {conf} directories..."):
-            data = run_research_agent(sport, conf)
+if st.button("🚀 Run Search Agent"):
+    with st.spinner(f"Agent is searching web for {conf} staff..."):
+        data = run_research_agent(sport, conf)
+        
+        if data:
+            st.success(f"Extracted {len(data)} staff members!")
+            df = pd.DataFrame(data)
+            st.dataframe(df, use_container_width=True)
             
-            if data:
-                st.success(f"Successfully extracted {len(data)} records!")
-                df = pd.DataFrame(data)
-                st.dataframe(df, use_container_width=True)
-                
-                # Automatically Save to Google Sheets
-                ws = get_worksheet()
-                if ws:
-                    rows = [[sport, conf, r.get('school'), r.get('coach_name'), r.get('title'), r.get('email')] for r in data]
-                    ws.append_rows(rows)
-                    st.toast("✅ Google Sheet Updated!")
-            else:
-                st.warning("No data returned. Verify your API key has Grounding enabled.")
+            # Save to Sheet
+            ws = get_gsheet()
+            if ws:
+                rows = [[sport, conf, r.get('school'), r.get('coach_name'), r.get('title'), r.get('email')] for r in data]
+                ws.append_rows(rows)
+                st.toast("✅ Google Sheet Updated!")
 
-with tab2:
-    ws = get_worksheet()
+# --- 5. HISTORY ---
+if st.checkbox("Show Database History"):
+    ws = get_gsheet()
     if ws:
-        records = ws.get_all_records()
-        if records:
-            st.dataframe(pd.DataFrame(records), use_container_width=True)
-        else:
-            st.info("The database is currently empty.")
-
-# --- 5. SIDEBAR DIAGNOSTICS ---
-with st.sidebar:
-    st.header("⚙️ System Status")
-    st.write("Model: `Gemini 2.0 Flash`")
-    st.write("Tool: `Google Search`")
-    if st.secrets.get("GEMINI_API_KEY"): st.write("✅ API Key: Loaded")
-    if get_worksheet(): st.write("✅ Google Sheets: Connected")
+        st.dataframe(pd.DataFrame(ws.get_all_records()))
