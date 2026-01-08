@@ -6,27 +6,11 @@ import google.generativeai as genai
 import json
 import time
 
-# #region agent log
-try:
-    with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-        f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'A', 'location': 'app.py:10', 'message': 'App execution started', 'timestamp': time.time()*1000}) + '\n')
-except: pass
-# #endregion
-
 # --- 1. SETUP & AUTHENTICATION ---
-# We grab the passwords from Streamlit's hidden "Secrets" menu
 try:
-    # #region agent log
-    try:
-        with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'B', 'location': 'app.py:18', 'message': 'Attempting to load secrets', 'timestamp': time.time()*1000}) + '\n')
-    except: pass
-    # #endregion
-    
-    # Setup Google Sheets connection
-    # We reconstruct the credentials dictionary from the secrets
+    # This looks for the hidden "Secrets" menu in Streamlit Cloud
     creds_dict = dict(st.secrets["gcp_service_account"])
-    # Fix private key formatting if it gets mangled
+    # Ensure the private key handles newlines correctly
     creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
     
     scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -35,26 +19,11 @@ try:
     
     # Setup Gemini AI
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    
-    # #region agent log
-    try:
-        with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'B', 'location': 'app.py:35', 'message': 'Secrets loaded successfully', 'timestamp': time.time()*1000}) + '\n')
-    except: pass
-    # #endregion
+    SHEET_URL = st.secrets["SHEET_URL"]
     
 except Exception as e:
-    # #region agent log
-    try:
-        with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'B', 'location': 'app.py:41', 'message': f'Secret loading failed: {str(e)}', 'timestamp': time.time()*1000}) + '\n')
-    except: pass
-    # #endregion
-    st.error(f"Error loading secrets: {e}")
+    st.error(f"⚠️ Setup Required: Please ensure your 'Secrets' are configured in the Streamlit Cloud dashboard. (Error: {e})")
     st.stop()
-
-# Use the Google Sheet URL from secrets
-SHEET_URL = st.secrets["SHEET_URL"]
 
 # Configure the AI Model with Search
 model = genai.GenerativeModel('gemini-1.5-pro', 
@@ -63,31 +32,12 @@ model = genai.GenerativeModel('gemini-1.5-pro',
 # --- 2. FUNCTIONS ---
 def get_data():
     """Fetch current data from Google Sheet"""
-    # #region agent log
-    try:
-        with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'C', 'location': 'app.py:48', 'message': f'Attempting to fetch data from {SHEET_URL}', 'timestamp': time.time()*1000}) + '\n')
-    except: pass
-    # #endregion
     try:
         sh = client.open_by_url(SHEET_URL)
-        # Assuming data is in the first tab (Sheet1)
+        # Assuming data is in the first tab
         worksheet = sh.get_worksheet(0)
-        df = pd.DataFrame(worksheet.get_all_records())
-        # #region agent log
-        try:
-            with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'C', 'location': 'app.py:58', 'message': f'Successfully fetched {len(df)} records', 'timestamp': time.time()*1000}) + '\n')
-        except: pass
-        # #endregion
-        return worksheet, df
+        return worksheet, pd.DataFrame(worksheet.get_all_records())
     except Exception as e:
-        # #region agent log
-        try:
-            with open('/Users/carolyn/Desktop/Crimson Coach Project/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({'sessionId': 'debug-session', 'runId': 'run1', 'hypothesisId': 'C', 'location': 'app.py:65', 'message': f'Sheet fetch failed: {str(e)}', 'timestamp': time.time()*1000}) + '\n')
-        except: pass
-        # #endregion
         st.error(f"Could not connect to Google Sheet: {e}")
         return None, pd.DataFrame()
 
@@ -133,7 +83,7 @@ worksheet, df = get_data()
 
 st.subheader(f"Database View: {target_conf}")
 
-if not df.empty:
+if worksheet is not None and not df.empty:
     # Filter view by selected conference
     if "conference" in df.columns:
         subset = df[df["conference"] == target_conf]
@@ -142,7 +92,7 @@ if not df.empty:
     else:
         st.dataframe(df)
 else:
-    st.info("Database is empty or could not load.")
+    st.info("Database is empty or could not load. Try clicking 'Find Coaches' below to start.")
 
 st.divider()
 
@@ -169,4 +119,3 @@ with col2:
                 st.rerun()
             else:
                 st.error("No data found or AI timed out. Try again.")
-
