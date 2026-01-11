@@ -82,7 +82,7 @@ Important:
 
     try:
         response = client.messages.create(
-            model="claude-haiku-4-20250414",# instead of sonnet
+            model="claude-3-5-haiku-20241022",
             max_tokens=2048,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}]
