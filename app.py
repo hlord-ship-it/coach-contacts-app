@@ -82,7 +82,7 @@ Important:
 
     try:
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-sonnet-4-20250514",
             max_tokens=2048,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt}]
@@ -291,7 +291,7 @@ if harvest_all or test_single:
         
         # Rate limiting
         if i < len(schools_to_search) - 1:
-            time.sleep(0.5)
+            time.sleep(3)
     
     # --- RESULTS SUMMARY ---
     st.divider()
