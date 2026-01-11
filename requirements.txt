@@ -1,6 +1,3 @@
 streamlit
+anthropic
 pandas
-gspread
-google-auth
-requests
-beautifulsoup4
